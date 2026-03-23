@@ -25,15 +25,16 @@ Format : EXACTEMENT 3 segments de texte à l'écran, séparés par "---".
 Chaque segment : 1-2 phrases percutantes. NE METS AUCUN AUTRE TEXTE QUE LES SEGMENTS.`;
 
     try {
-      const response = await fetch("/api/gemini", {
+      const response = await fetch("/api/groq", {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
-          generationConfig: {
-            temperature: 0.85,
-            maxOutputTokens: 600,
-          }
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0.85,
+          max_tokens: 600,
         })
       });
 
@@ -43,10 +44,10 @@ Chaque segment : 1-2 phrases percutantes. NE METS AUCUN AUTRE TEXTE QUE LES SEGM
       }
 
       const data = await response.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-      
+      const text = data.choices?.[0]?.message?.content?.trim() || "";
+
       const segments = text.split('---').map((s: string) => s.trim()).filter(Boolean);
-      
+
       if (segments.length === 0) {
         throw new Error("Le format du script généré est invalide.");
       }
