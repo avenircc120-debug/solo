@@ -571,16 +571,22 @@ ${hasNetlify ? `NETLIFY (actions disponibles) :
 TOUJOURS DISPONIBLE :
 - http_request : appel HTTP générique vers n'importe quelle API (fields: url, method, headers, body, tokenName)
 
+RÈGLES CRITIQUES — EXÉCUTION AUTOMATIQUE :
+⚡ IMPORTANT : Le système exécute automatiquement l'action si TOUS les champs de "actionParams" sont remplis.
+⚡ Tu DOIS toujours remplir TOUS les champs dans "actionParams" avec les vraies valeurs — JAMAIS laisser un champ vide si tu peux le déduire.
+⚡ Si l'utilisateur mentionne un repo (ex: "avenircc120-debug/jeremy"), tu DOIS le mettre dans actionParams.repo.
+⚡ Si tu génères du code, tu DOIS le mettre entier dans actionParams.content.
+⚡ Si l'utilisateur dit "modifie le nom de l'app", tu lis d'abord le fichier existant puis génères le contenu COMPLET modifié.
+
 RÈGLES DE GÉNÉRATION DE WIDGETS :
-1. Quand l'utilisateur demande de faire quelque chose sur un service → génère le widget "api_action" avec l'action correcte
-2. Pré-remplis les "actionParams" avec du vrai contenu généré — notamment le code complet pour "content"
-3. Les actionParams sont les valeurs par défaut affichées dans le widget, l'utilisateur peut les modifier avant de valider
-4. Si l'utilisateur demande de "écrire du code", génère le code complet dans actionParams.content
-5. Si plusieurs actions sont nécessaires, explique la séquence et commence par la première
-6. Pour les actions sans token disponible → explique comment ajouter le token via le bouton +
+1. Quand l'utilisateur demande de faire quelque chose → génère IMMÉDIATEMENT le widget "api_action" avec l'action correcte
+2. Remplis TOUS les champs dans "actionParams" — repo, path, content, message — avec les vraies valeurs
+3. Ne laisse JAMAIS un champ vide si tu connais la valeur ou peux la déduire du contexte
+4. Si tu ne connais pas un champ → pose UNE question précise avant de générer le widget
+5. Pour les modifications de fichiers : génère le contenu COMPLET du fichier dans actionParams.content
+6. Pour les actions sans token disponible → explique comment ajouter le token via le panneau jetons
 7. Réponds TOUJOURS en français
-8. Si tu ne sais pas le repo/projet exact → laisse le champ vide pour que l'utilisateur le remplisse
-9. GÉNÈRE DU VRAI CODE, pas des placeholders — si l'utilisateur dit "crée un composant Button", écris le vrai code TypeScript/React complet`;
+8. GÉNÈRE DU VRAI CODE, pas des placeholders`;
   }, [ctx.tokens, ctx.service, ctx.selectedRepo]);
 
   // ── Envoi de message ────────────────────────────────────────
@@ -598,6 +604,36 @@ RÈGLES DE GÉNÉRATION DE WIDGETS :
       }));
 
       const response = await callGroq(systemPrompt, history, text);
+
+      // ── Auto-exécution si tous les champs actionParams sont remplis ──
+      const w = response.widget;
+      if (w && w.action && w.actionParams) {
+        const fields = w.fields ?? [];
+        const params = w.actionParams;
+        const allFilled = fields.length === 0 || fields.every(f => params[f.key] && String(params[f.key]).trim() !== "");
+
+        if (allFilled) {
+          // Afficher le message "en cours"
+          addMessage({ role: "assistant", text: response.text, widget: { ...w, submitted: false } });
+          try {
+            const result = await executeWidgetAction(w.action, params, ctx);
+            // Marquer le widget comme complété avec le résultat
+            setMessages(prev => {
+              const idx = [...prev].reverse().findIndex(m => m.role === "assistant" && m.widget);
+              if (idx === -1) return prev;
+              const realIdx = prev.length - 1 - idx;
+              const updated = [...prev];
+              updated[realIdx] = { ...updated[realIdx], widget: { ...w, submitted: true, result } };
+              return updated;
+            });
+            addMessage({ role: "assistant", text: result });
+          } catch (e) {
+            addMessage({ role: "assistant", text: `❌ Erreur lors de l'exécution : ${String(e)}` });
+          }
+          return;
+        }
+      }
+
       addMessage({
         role: "assistant",
         text: response.text,
