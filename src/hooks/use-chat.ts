@@ -497,6 +497,16 @@ export function useChat(ctx: ChatContext) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // Charger une conversation existante dans le hook
+  const loadMessages = useCallback((msgs: ChatMessage[]) => {
+    // Convertir les timestamps string → Date si nécessaire (venant du localStorage)
+    const normalized = msgs.map(m => ({
+      ...m,
+      timestamp: m.timestamp instanceof Date ? m.timestamp : new Date(m.timestamp),
+    }));
+    setMessages(normalized);
+  }, []);
+
   const addMessage = useCallback((msg: Omit<ChatMessage, "id" | "timestamp">) => {
     const full: ChatMessage = {
       ...msg,
@@ -664,5 +674,5 @@ RÈGLES DE GÉNÉRATION DE WIDGETS :
     }
   }, [ctx, addMessage]);
 
-  return { messages, input, setInput, loading, sendMessage, submitWidget, updateLastAssistantWidget };
+  return { messages, input, setInput, loading, sendMessage, submitWidget, updateLastAssistantWidget, loadMessages };
 }
