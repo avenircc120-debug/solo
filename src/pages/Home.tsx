@@ -1,14 +1,9 @@
-import { AutoConfigSection } from "@/components/AutoConfigSection";
+import { ChatSection } from "@/components/ChatSection";
 
 export default function Home() {
   return (
-    <div
-      className="min-h-screen bg-background relative"
-      style={{
-        backgroundImage: `radial-gradient(ellipse 80% 60% at 50% -10%, hsl(217 91% 18% / 0.5), transparent)`,
-      }}
-    >
-      <AutoConfigSection />
+    <div className="h-screen bg-white flex flex-col">
+      <ChatSection ctx={{}} />
     </div>
   );
 }
