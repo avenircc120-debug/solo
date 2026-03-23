@@ -1,15 +1,16 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { detectService, type DetectedService } from "./use-auto-config";
 
-// ── Types de widgets générés dynamiquement dans le chat ─────────
+// ── Types ───────────────────────────────────────────────────────
 export type WidgetType =
-  | "token_input"     // champ mot de passe pour un token
-  | "env_input"       // clé + valeur pour variable d'environnement
-  | "file_input"      // chemin + contenu pour créer/éditer un fichier
-  | "repo_select"     // sélection d'un dépôt GitHub
-  | "text_input"      // champ texte simple
-  | "confirm"         // bouton de confirmation
-  | "code_block";     // bloc de code readonly (résultat)
+  | "token_input"
+  | "env_input"
+  | "file_input"
+  | "repo_select"
+  | "text_input"
+  | "confirm"
+  | "code_block"
+  | "api_action";   // ← nouvelle: appel API générique confirmé
 
 export interface WidgetField {
   key: string;
@@ -24,12 +25,12 @@ export interface Widget {
   type: WidgetType;
   label?: string;
   fields?: WidgetField[];
-  action?: string;          // action à exécuter au submit
-  actionParams?: Record<string, string>; // paramètres pré-remplis
-  code?: string;            // pour code_block
-  language?: string;        // pour code_block
-  submitted?: boolean;      // true une fois soumis
-  result?: string;          // résultat après soumission
+  action?: string;
+  actionParams?: Record<string, string>;
+  code?: string;
+  language?: string;
+  submitted?: boolean;
+  result?: string;
 }
 
 export interface ChatMessage {
@@ -40,55 +41,435 @@ export interface ChatMessage {
   timestamp: Date;
 }
 
-// ── Contexte partagé avec le configurateur ────────────────────
+export interface AccessToken {
+  id: string;
+  name: string;
+  value: string;
+}
+
 export interface ChatContext {
   token?: string;
   geminiKey?: string;
   service?: DetectedService;
   selectedRepo?: string;
+  tokens?: AccessToken[];
 }
 
-// ── Appel Gemini pour analyser le message et décider du widget ─
-async function callGemini(geminiKey: string, systemPrompt: string, userMessage: string): Promise<{ text: string; widget?: Widget }> {
-  const prompt = `${systemPrompt}
+// ── Détection de service par nom ou valeur du token ─────────────
+function detectServiceFromToken(name: string, value: string): string {
+  const n = name.toLowerCase();
+  const v = value.toLowerCase();
+  if (n.includes("github") || v.startsWith("ghp_") || v.startsWith("github_pat_")) return "github";
+  if (n.includes("supabase")) return "supabase";
+  if (n.includes("vercel")) return "vercel";
+  if (n.includes("netlify")) return "netlify";
+  if (n.includes("openai") || v.startsWith("sk-")) return "openai";
+  if (n.includes("anthropic") || v.startsWith("sk-ant-")) return "anthropic";
+  if (n.includes("gemini") || n.includes("google")) return "gemini";
+  if (n.includes("stripe") || v.startsWith("sk_")) return "stripe";
+  if (n.includes("notion")) return "notion";
+  if (n.includes("slack")) return "slack";
+  if (n.includes("discord")) return "discord";
+  if (n.includes("twitter") || n.includes("x.com")) return "twitter";
+  if (n.includes("firebase")) return "firebase";
+  if (n.includes("mongodb") || n.includes("atlas")) return "mongodb";
+  if (n.includes("planetscale")) return "planetscale";
+  if (n.includes("railway")) return "railway";
+  if (n.includes("render")) return "render";
+  if (n.includes("aws")) return "aws";
+  if (n.includes("cloudflare")) return "cloudflare";
+  if (n.includes("linear")) return "linear";
+  if (n.includes("jira") || n.includes("atlassian")) return "jira";
+  return "api";
+}
 
-Message de l'utilisateur : "${userMessage}"
+// ── Capacités par service ───────────────────────────────────────
+const SERVICE_CAPABILITIES: Record<string, string> = {
+  github: "créer/lire/modifier/supprimer des fichiers, créer des dépôts, gérer branches, issues, PRs, secrets, GitHub Actions, webhooks, déployer via Pages",
+  supabase: "exécuter du SQL, gérer des tables, créer/supprimer des projets, gérer les utilisateurs auth, le stockage, les Edge Functions, les webhooks, les politiques RLS",
+  vercel: "déployer des projets, gérer les variables d'environnement, les domaines, les déploiements, les équipes, les projets, les logs",
+  netlify: "déployer des sites, gérer les variables d'environnement, les domaines, les builds, les fonctions, les formulaires",
+  openai: "générer du texte, des images, des embeddings, fine-tuning, gérer les modèles et les fichiers",
+  anthropic: "générer du texte avec Claude, gérer les messages",
+  gemini: "générer du texte, des images avec Gemini",
+  stripe: "créer des produits, des prix, des abonnements, des clients, des factures, consulter les paiements",
+  notion: "créer/modifier des pages, des bases de données, des blocs, gérer les membres",
+  slack: "envoyer des messages, créer des canaux, gérer les utilisateurs, les webhooks",
+  discord: "envoyer des messages, gérer des serveurs, des canaux, des rôles",
+  twitter: "publier des tweets, gérer le profil, les followers",
+  firebase: "gérer Firestore, Auth, Storage, Functions, Hosting",
+  mongodb: "requêtes CRUD sur les collections Atlas",
+  railway: "déployer des services, gérer les variables, les volumes",
+  cloudflare: "gérer DNS, Workers, Pages, R2",
+  linear: "créer/modifier des issues, des projets, des équipes",
+  aws: "gérer S3, Lambda, EC2, RDS, et autres services AWS",
+  api: "faire des appels HTTP personnalisés avec ce token",
+};
 
-Réponds UNIQUEMENT avec du JSON valide (pas de markdown, pas de \`\`\`json), format exact :
+// ── Appel GitHub API ────────────────────────────────────────────
+async function githubRequest(token: string, path: string, method = "GET", body?: object) {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      Authorization: `token ${token}`,
+      Accept: "application/vnd.github.v3+json",
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message ?? `GitHub ${res.status}`);
+  }
+  return res.status === 204 ? {} : res.json();
+}
+
+// ── Appel Supabase Management API ──────────────────────────────
+async function supabaseRequest(token: string, path: string, method = "GET", body?: object) {
+  const res = await fetch(`https://api.supabase.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message ?? `Supabase ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── Appel Vercel API ────────────────────────────────────────────
+async function vercelRequest(token: string, path: string, method = "GET", body?: object) {
+  const res = await fetch(`https://api.vercel.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message ?? `Vercel ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── Appel Netlify API ───────────────────────────────────────────
+async function netlifyRequest(token: string, path: string, method = "GET", body?: object) {
+  const res = await fetch(`https://api.netlify.com/api/v1${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message ?? `Netlify ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── Exécution des actions ───────────────────────────────────────
+async function executeWidgetAction(
+  action: string,
+  values: Record<string, string>,
+  ctx: ChatContext
+): Promise<string> {
+  const tokens = ctx.tokens ?? [];
+
+  // Trouver le bon token par service ou prendre le premier
+  function getToken(preferredService: string): string {
+    const found = tokens.find(t => detectServiceFromToken(t.name, t.value) === preferredService);
+    return found?.value ?? ctx.token ?? tokens[0]?.value ?? "";
+  }
+
+  // ─── GitHub ────────────────────────────────────────────────
+  if (action === "github_push_file") {
+    const token = getToken("github");
+    if (!token) throw new Error("Token GitHub introuvable. Ajoutez-le via le bouton +");
+    const { repo, path, content, message } = values;
+    if (!repo || !path || !content) throw new Error("repo, path et content sont requis");
+    // Obtenir SHA si fichier existe
+    let sha: string | undefined;
+    try {
+      const existing = await githubRequest(token, `/repos/${repo}/contents/${path}`);
+      sha = (existing as { sha?: string }).sha;
+    } catch { /* nouveau fichier */ }
+
+    const body: Record<string, string> = {
+      message: message ?? `Update ${path} via Solo AI`,
+      content: btoa(unescape(encodeURIComponent(content))),
+    };
+    if (sha) body.sha = sha;
+    await githubRequest(token, `/repos/${repo}/contents/${path}`, "PUT", body);
+    return `✅ Fichier \`${path}\` mis à jour dans \`${repo}\``;
+  }
+
+  if (action === "github_read_file") {
+    const token = getToken("github");
+    if (!token) throw new Error("Token GitHub introuvable");
+    const { repo, path } = values;
+    const data = await githubRequest(token, `/repos/${repo}/contents/${path}`) as { content: string };
+    return atob(data.content.replace(/\n/g, ""));
+  }
+
+  if (action === "github_create_repo") {
+    const token = getToken("github");
+    if (!token) throw new Error("Token GitHub introuvable");
+    const { name, description, privateRepo } = values;
+    const data = await githubRequest(token, "/user/repos", "POST", {
+      name, description: description ?? "",
+      private: privateRepo === "true",
+      auto_init: true,
+    }) as { full_name: string; html_url: string };
+    return `✅ Dépôt \`${data.full_name}\` créé : ${data.html_url}`;
+  }
+
+  if (action === "github_list_repos") {
+    const token = getToken("github");
+    if (!token) throw new Error("Token GitHub introuvable");
+    const repos = await githubRequest(token, "/user/repos?per_page=20&sort=updated") as { full_name: string }[];
+    return `Vos dépôts :\n${repos.map(r => `• ${r.full_name}`).join("\n")}`;
+  }
+
+  if (action === "github_create_issue") {
+    const token = getToken("github");
+    if (!token) throw new Error("Token GitHub introuvable");
+    const { repo, title, body } = values;
+    const data = await githubRequest(token, `/repos/${repo}/issues`, "POST", { title, body: body ?? "" }) as { number: number; html_url: string };
+    return `✅ Issue #${data.number} créée : ${data.html_url}`;
+  }
+
+  if (action === "github_create_branch") {
+    const token = getToken("github");
+    if (!token) throw new Error("Token GitHub introuvable");
+    const { repo, branch, from } = values;
+    const ref = await githubRequest(token, `/repos/${repo}/git/refs/heads/${from ?? "main"}`) as { object: { sha: string } };
+    await githubRequest(token, `/repos/${repo}/git/refs`, "POST", {
+      ref: `refs/heads/${branch}`,
+      sha: ref.object.sha,
+    });
+    return `✅ Branche \`${branch}\` créée depuis \`${from ?? "main"}\` dans \`${repo}\``;
+  }
+
+  if (action === "github_set_secret") {
+    const token = getToken("github");
+    if (!token) throw new Error("Token GitHub introuvable");
+    const { repo, secretName } = values;
+    // Note: GitHub Secrets nécessite libsodium pour le chiffrement
+    // On informe l'utilisateur
+    return `ℹ️ Pour créer le secret \`${secretName}\` dans \`${repo}\`, allez sur GitHub → Settings → Secrets and variables → Actions → New repository secret`;
+  }
+
+  // ─── Supabase ──────────────────────────────────────────────
+  if (action === "supabase_list_projects") {
+    const token = getToken("supabase");
+    if (!token) throw new Error("Token Supabase introuvable");
+    const projects = await supabaseRequest(token, "/v1/projects") as { name: string; id: string; region: string }[];
+    return `Vos projets Supabase :\n${projects.map(p => `• ${p.name} (${p.id}) — ${p.region}`).join("\n")}`;
+  }
+
+  if (action === "supabase_run_sql") {
+    const token = getToken("supabase");
+    if (!token) throw new Error("Token Supabase introuvable");
+    const { projectRef, query } = values;
+    if (!projectRef || !query) throw new Error("projectRef et query sont requis");
+    const result = await supabaseRequest(token, `/v1/projects/${projectRef}/database/query`, "POST", { query });
+    return `✅ Requête exécutée :\n${JSON.stringify(result, null, 2)}`;
+  }
+
+  if (action === "supabase_create_table") {
+    const token = getToken("supabase");
+    if (!token) throw new Error("Token Supabase introuvable");
+    const { projectRef, tableName, columns } = values;
+    const sql = `CREATE TABLE IF NOT EXISTS ${tableName} (${columns ?? "id uuid primary key default gen_random_uuid(), created_at timestamp with time zone default now()"});`;
+    await supabaseRequest(token, `/v1/projects/${projectRef}/database/query`, "POST", { query: sql });
+    return `✅ Table \`${tableName}\` créée dans le projet \`${projectRef}\``;
+  }
+
+  if (action === "supabase_create_project") {
+    const token = getToken("supabase");
+    if (!token) throw new Error("Token Supabase introuvable");
+    const { name, organizationId, dbPassword, region } = values;
+    const data = await supabaseRequest(token, "/v1/projects", "POST", {
+      name, organization_id: organizationId,
+      db_pass: dbPassword, region: region ?? "us-east-1",
+    }) as { id: string; name: string };
+    return `✅ Projet Supabase \`${data.name}\` créé (ID: ${data.id})`;
+  }
+
+  // ─── Vercel ────────────────────────────────────────────────
+  if (action === "vercel_list_projects") {
+    const token = getToken("vercel");
+    if (!token) throw new Error("Token Vercel introuvable");
+    const data = await vercelRequest(token, "/v9/projects") as { projects: { name: string; id: string }[] };
+    return `Vos projets Vercel :\n${data.projects.map(p => `• ${p.name} (${p.id})`).join("\n")}`;
+  }
+
+  if (action === "vercel_create_env") {
+    const token = getToken("vercel");
+    if (!token) throw new Error("Token Vercel introuvable");
+    const { projectId, key, value, target } = values;
+    await vercelRequest(token, `/v10/projects/${projectId}/env`, "POST", {
+      key, value,
+      type: "encrypted",
+      target: (target ?? "production,preview,development").split(","),
+    });
+    return `✅ Variable \`${key}\` créée dans le projet Vercel \`${projectId}\``;
+  }
+
+  if (action === "vercel_list_deployments") {
+    const token = getToken("vercel");
+    if (!token) throw new Error("Token Vercel introuvable");
+    const { projectId } = values;
+    const data = await vercelRequest(token, `/v6/deployments?projectId=${projectId}&limit=5`) as { deployments: { url: string; state: string; createdAt: number }[] };
+    return `Derniers déploiements :\n${data.deployments.map(d => `• ${d.url} — ${d.state}`).join("\n")}`;
+  }
+
+  if (action === "vercel_delete_env") {
+    const token = getToken("vercel");
+    if (!token) throw new Error("Token Vercel introuvable");
+    const { projectId, envId } = values;
+    await vercelRequest(token, `/v10/projects/${projectId}/env/${envId}`, "DELETE");
+    return `✅ Variable d'environnement supprimée`;
+  }
+
+  // ─── Netlify ───────────────────────────────────────────────
+  if (action === "netlify_list_sites") {
+    const token = getToken("netlify");
+    if (!token) throw new Error("Token Netlify introuvable");
+    const sites = await netlifyRequest(token, "/sites") as { name: string; id: string; url: string }[];
+    return `Vos sites Netlify :\n${sites.map(s => `• ${s.name} — ${s.url}`).join("\n")}`;
+  }
+
+  if (action === "netlify_create_env") {
+    const token = getToken("netlify");
+    if (!token) throw new Error("Token Netlify introuvable");
+    const { siteId, key, value } = values;
+    await netlifyRequest(token, `/sites/${siteId}/env`, "POST", { [key]: value });
+    return `✅ Variable \`${key}\` créée sur Netlify (site: ${siteId})`;
+  }
+
+  if (action === "netlify_get_env") {
+    const token = getToken("netlify");
+    if (!token) throw new Error("Token Netlify introuvable");
+    const { siteId } = values;
+    const envVars = await netlifyRequest(token, `/sites/${siteId}/env`);
+    const keys = Object.keys(envVars as object);
+    return `Variables d'environnement du site :\n${keys.map(k => `• ${k}`).join("\n")}`;
+  }
+
+  // ─── Appel HTTP générique ──────────────────────────────────
+  if (action === "http_request") {
+    const { url, method, headers: rawHeaders, body: rawBody, tokenName } = values;
+    if (!url) throw new Error("URL requise");
+
+    // Trouver le token à utiliser
+    const tokenToUse = tokenName
+      ? tokens.find(t => t.name.toLowerCase() === tokenName.toLowerCase())?.value ?? ctx.token ?? ""
+      : ctx.token ?? tokens[0]?.value ?? "";
+
+    const parsedHeaders: Record<string, string> = { "Content-Type": "application/json" };
+    if (rawHeaders) {
+      try {
+        const h = JSON.parse(rawHeaders);
+        Object.assign(parsedHeaders, h);
+      } catch { /* ignore */ }
+    }
+    // Substituer le token dans les headers
+    for (const k of Object.keys(parsedHeaders)) {
+      parsedHeaders[k] = parsedHeaders[k].replace("{{TOKEN}}", tokenToUse);
+    }
+
+    const res = await fetch(url, {
+      method: method ?? "GET",
+      headers: parsedHeaders,
+      body: rawBody ? rawBody.replace("{{TOKEN}}", tokenToUse) : undefined,
+    });
+    const text = await res.text();
+    let pretty = text;
+    try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch { /* not JSON */ }
+    return `Réponse ${res.status}:\n${pretty.slice(0, 1000)}${pretty.length > 1000 ? "\n…(tronqué)" : ""}`;
+  }
+
+  // ─── Anciennes actions (rétrocompatibilité) ────────────────
+  if (action === "push_file") {
+    return executeWidgetAction("github_push_file", values, ctx);
+  }
+
+  if (action === "save_token") {
+    return "Token enregistré pour cette session.";
+  }
+
+  if (action === "create_env_var") {
+    // Auto-détecte le service
+    if (values.service === "vercel") return executeWidgetAction("vercel_create_env", values, ctx);
+    if (values.service === "netlify") return executeWidgetAction("netlify_create_env", values, ctx);
+    return executeWidgetAction("github_push_file", {
+      repo: values.repo ?? ctx.selectedRepo ?? "",
+      path: ".env.example",
+      content: `${values.varKey}=\n`,
+      message: `Add ${values.varKey} to .env.example`,
+    }, ctx);
+  }
+
+  return `Action "${action}" exécutée.`;
+}
+
+// ── Appel Gemini ────────────────────────────────────────────────
+async function callGemini(
+  geminiKey: string,
+  systemPrompt: string,
+  history: { role: "user" | "model"; text: string }[],
+  userMessage: string
+): Promise<{ text: string; widget?: Widget }> {
+
+  const conversationParts = history.map(h => ({
+    role: h.role,
+    parts: [{ text: h.text }],
+  }));
+
+  const fullPrompt = `${systemPrompt}
+
+HISTORIQUE DE LA CONVERSATION :
+${history.map(h => `${h.role === "user" ? "Utilisateur" : "Assistant"}: ${h.text}`).join("\n")}
+
+Nouveau message de l'utilisateur : "${userMessage}"
+
+INSTRUCTIONS CRITIQUES :
+1. Réponds UNIQUEMENT avec du JSON valide (zéro markdown, zéro \`\`\`json)
+2. Format requis :
 {
-  "text": "ta réponse en texte ici",
+  "text": "ta réponse en français ici",
   "widget": null
 }
-ou si un widget est nécessaire :
+OU avec widget :
 {
-  "text": "ta réponse ici",
+  "text": "explication de ce que tu vas faire",
   "widget": {
-    "type": "env_input",
-    "label": "Créer une variable d'environnement",
+    "type": "api_action",
+    "label": "Description de l'action",
+    "action": "github_push_file",
     "fields": [
-      { "key": "varKey", "label": "Nom de la variable", "placeholder": "ex: GEMINI_API_KEY", "type": "text", "required": true },
-      { "key": "varValue", "label": "Valeur", "placeholder": "Collez votre token ici", "type": "password", "required": true }
+      { "key": "repo", "label": "Dépôt (owner/repo)", "type": "text", "placeholder": "user/mon-projet" },
+      { "key": "path", "label": "Chemin du fichier", "type": "text", "placeholder": "src/App.tsx" },
+      { "key": "content", "label": "Contenu", "type": "textarea", "placeholder": "..." },
+      { "key": "message", "label": "Message de commit", "type": "text", "placeholder": "feat: ..." }
     ],
-    "action": "create_env_var"
+    "actionParams": {
+      "repo": "user/mon-projet",
+      "path": "src/components/Button.tsx",
+      "content": "import React from 'react';\n\nexport function Button() { return <button>Click</button>; }",
+      "message": "feat: add Button component"
+    }
   }
-}
-
-Types de widgets disponibles :
-- "token_input" : 1 champ password pour capturer un token (action: "save_token")
-- "env_input" : 2 champs (nom + valeur) pour variable d'env (action: "create_env_var")  
-- "file_input" : champ texte (chemin) + textarea (contenu) pour fichier (action: "push_file")
-- "repo_select" : sélection de dépôt (action: "select_repo")
-- "text_input" : champ texte générique
-- "confirm" : bouton de confirmation (action selon contexte)
-- null : aucun widget, réponse textuelle seule
-
-Règles :
-- Si l'utilisateur demande de créer/ajouter une variable d'environnement → widget "env_input"
-- Si l'utilisateur demande de saisir/entrer un token → widget "token_input"
-- Si l'utilisateur demande de créer/modifier un fichier → widget "file_input"
-- Si l'utilisateur demande de choisir un dépôt → widget "repo_select"
-- Pour toute autre demande → widget null, réponse textuelle
-- Réponds toujours en français`;
+}`;
 
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
@@ -96,168 +477,120 @@ Règles :
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 1000 },
+        contents: [{ parts: [{ text: fullPrompt }] }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
       }),
     }
   );
 
-  if (!res.ok) throw new Error(`Gemini ${res.status}`);
+  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
   const data = await res.json();
   const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '{"text":"Erreur de réponse."}';
 
+  // Nettoyer si Gemini enveloppe dans des backticks
+  const clean = raw.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
+
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(clean);
+    return parsed;
   } catch {
-    // Si le JSON est mal formé, on extrait juste le texte
-    return { text: raw.replace(/[{}"]/g, "").trim() };
+    return { text: clean.replace(/[{}"\\]/g, "").trim() || raw };
   }
 }
 
-// ── Actions exécutées lors de la soumission d'un widget ────────
-async function executeWidgetAction(
-  action: string,
-  values: Record<string, string>,
-  ctx: ChatContext
-): Promise<string> {
-  const token = ctx.token ?? "";
-
-  switch (action) {
-    case "save_token": {
-      const detected = detectService(values.token ?? "");
-      if (detected.key === "unknown") return `Service non reconnu pour ce token.`;
-      return `Token ${detected.name} enregistré pour cette session.`;
-    }
-
-    case "create_env_var": {
-      if (!token) return "Aucun token de service configuré. Collez votre token d'accès d'abord.";
-      const { varKey, varValue } = values;
-      if (!varKey || !varValue) return "Clé ou valeur manquante.";
-
-      if (ctx.service?.key === "vercel") {
-        const projectId = ctx.selectedRepo;
-        if (!projectId) return "Sélectionnez d'abord un projet Vercel.";
-        const res = await fetch(`https://api.vercel.com/v10/projects/${projectId}/env`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ key: varKey, value: varValue, type: "encrypted", target: ["production", "preview", "development"] }),
-        });
-        if (!res.ok) throw new Error(await res.text());
-        return `Variable \`${varKey}\` créée avec succès sur Vercel (projet: ${projectId}).`;
-      }
-
-      if (ctx.service?.key === "github") {
-        // Pour GitHub, on crée/update un fichier .env.example
-        const repo = ctx.selectedRepo;
-        if (!repo) return "Sélectionnez d'abord un dépôt GitHub.";
-        const [owner, repoName] = repo.split("/");
-        // Lire .env.example existant
-        let existingContent = "";
-        let sha: string | undefined;
-        try {
-          const f = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/.env.example`, {
-            headers: { Authorization: `token ${token}`, Accept: "application/vnd.github.v3+json" },
-          });
-          if (f.ok) {
-            const fd = await f.json();
-            existingContent = atob(fd.content.replace(/\n/g, "")) + "\n";
-            sha = fd.sha;
-          }
-        } catch { /* nouveau fichier */ }
-
-        const newContent = existingContent + `${varKey}=\n`;
-        const body: Record<string, string> = {
-          message: `Add ${varKey} to .env.example via Studio AI`,
-          content: btoa(unescape(encodeURIComponent(newContent))),
-        };
-        if (sha) body.sha = sha;
-
-        const res = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/.env.example`, {
-          method: "PUT",
-          headers: { Authorization: `token ${token}`, Accept: "application/vnd.github.v3+json", "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) throw new Error(await res.text());
-        return `Variable \`${varKey}\` ajoutée dans \`.env.example\` du dépôt ${repo}.`;
-      }
-
-      return `Variable \`${varKey}\` enregistrée localement pour cette session.`;
-    }
-
-    case "push_file": {
-      if (!token || ctx.service?.key !== "github") return "Token GitHub requis.";
-      const repo = ctx.selectedRepo;
-      if (!repo) return "Sélectionnez d'abord un dépôt GitHub.";
-      const [owner, repoName] = repo.split("/");
-      const { filePath, fileContent } = values;
-      let sha: string | undefined;
-      try {
-        const f = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}`, {
-          headers: { Authorization: `token ${token}`, Accept: "application/vnd.github.v3+json" },
-        });
-        if (f.ok) sha = (await f.json()).sha;
-      } catch { /* nouveau fichier */ }
-
-      const body: Record<string, string> = {
-        message: `Update ${filePath} via Studio AI`,
-        content: btoa(unescape(encodeURIComponent(fileContent))),
-      };
-      if (sha) body.sha = sha;
-
-      const res = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}`, {
-        method: "PUT",
-        headers: { Authorization: `token ${token}`, Accept: "application/vnd.github.v3+json", "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      return `Fichier \`${filePath}\` poussé avec succès sur GitHub (${repo}).`;
-    }
-
-    default:
-      return `Action "${action}" reçue.`;
-  }
-}
-
-// ── Hook principal ─────────────────────────────────────────────
+// ── Hook principal ──────────────────────────────────────────────
 export function useChat(ctx: ChatContext) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      text: ctx.service
-        ? `Je suis connecté à votre compte **${ctx.service.name}**. Que voulez-vous configurer ? Dites-moi par exemple : *"crée une variable d'environnement"*, *"lis le fichier package.json"*, *"pousse un fichier de config"*…`
-        : `Bienvenue ! Collez votre token d'accès (GitHub, Vercel, Supabase…) pour commencer. Ensuite, dites-moi ce que vous voulez configurer.`,
-      timestamp: new Date(),
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const addMessage = (msg: Omit<ChatMessage, "id" | "timestamp">) => {
-    const newMsg: ChatMessage = { ...msg, id: crypto.randomUUID(), timestamp: new Date() };
-    setMessages(prev => [...prev, newMsg]);
-    return newMsg;
-  };
+  const addMessage = useCallback((msg: Omit<ChatMessage, "id" | "timestamp">) => {
+    const full: ChatMessage = {
+      ...msg,
+      id: Math.random().toString(36).slice(2),
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, full]);
+    return full;
+  }, []);
 
-  const updateLastAssistantWidget = (widgetUpdate: Partial<Widget>) => {
+  const updateLastAssistantWidget = useCallback((widget: Widget) => {
     setMessages(prev => {
-      const copy = [...prev];
-      for (let i = copy.length - 1; i >= 0; i--) {
-        if (copy[i].role === "assistant" && copy[i].widget) {
-          copy[i] = { ...copy[i], widget: { ...copy[i].widget!, ...widgetUpdate } };
-          break;
-        }
-      }
-      return copy;
+      const idx = [...prev].reverse().findIndex(m => m.role === "assistant");
+      if (idx === -1) return prev;
+      const realIdx = prev.length - 1 - idx;
+      const updated = [...prev];
+      updated[realIdx] = { ...updated[realIdx], widget };
+      return updated;
     });
-  };
+  }, []);
 
-  const systemPrompt = `Tu es un assistant IA de configuration de projets logiciels. 
-Service connecté : ${ctx.service?.name ?? "aucun"}.
-Dépôt/Projet sélectionné : ${ctx.selectedRepo ?? "aucun"}.
-Token disponible : ${ctx.token ? "oui" : "non"}.
-Ton rôle : comprendre les demandes de configuration et générer les bons widgets interactifs ou répondre textuellement.`;
+  // ── Prompt système enrichi ───────────────────────────────────
+  const systemPrompt = useMemo(() => {
+    const tokens = ctx.tokens ?? [];
+    const tokenList = tokens.length > 0
+      ? tokens.map(t => {
+          const svc = detectServiceFromToken(t.name, t.value);
+          const caps = SERVICE_CAPABILITIES[svc] ?? "appels API génériques";
+          return `• ${t.name} (${svc}) → peut : ${caps}`;
+        }).join("\n")
+      : "Aucun token configuré (l'utilisateur peut en ajouter via le bouton +)";
 
+    const hasGithub = tokens.some(t => detectServiceFromToken(t.name, t.value) === "github");
+    const hasSupabase = tokens.some(t => detectServiceFromToken(t.name, t.value) === "supabase");
+    const hasVercel = tokens.some(t => detectServiceFromToken(t.name, t.value) === "vercel");
+    const hasNetlify = tokens.some(t => detectServiceFromToken(t.name, t.value) === "netlify");
+
+    return `Tu es un assistant IA universel ultra-puissant capable d'interagir directement avec n'importe quelle API et service.
+
+TOKENS D'ACCÈS DISPONIBLES :
+${tokenList}
+
+TU PEUX EFFECTUER DES ACTIONS RÉELLES sur ces services. Ne te contente pas de donner des instructions — FAIS-LE VRAIMENT en générant les bons widgets d'action.
+
+ACTIONS DISPONIBLES PAR SERVICE :
+
+${hasGithub ? `GITHUB (actions disponibles) :
+- github_push_file : créer ou modifier un fichier dans un repo (fields: repo, path, content, message)
+- github_read_file : lire le contenu d'un fichier (fields: repo, path)
+- github_create_repo : créer un nouveau dépôt (fields: name, description, privateRepo)
+- github_list_repos : lister les dépôts de l'utilisateur (aucun field requis)
+- github_create_issue : créer une issue (fields: repo, title, body)
+- github_create_branch : créer une branche (fields: repo, branch, from)
+` : ""}
+${hasSupabase ? `SUPABASE (actions disponibles) :
+- supabase_list_projects : lister les projets (aucun field requis)
+- supabase_run_sql : exécuter du SQL (fields: projectRef, query)
+- supabase_create_table : créer une table (fields: projectRef, tableName, columns)
+- supabase_create_project : créer un projet (fields: name, organizationId, dbPassword, region)
+` : ""}
+${hasVercel ? `VERCEL (actions disponibles) :
+- vercel_list_projects : lister les projets (aucun field requis)
+- vercel_create_env : créer une variable d'env (fields: projectId, key, value, target)
+- vercel_list_deployments : lister les déploiements (fields: projectId)
+- vercel_delete_env : supprimer une variable (fields: projectId, envId)
+` : ""}
+${hasNetlify ? `NETLIFY (actions disponibles) :
+- netlify_list_sites : lister les sites (aucun field requis)
+- netlify_create_env : créer une variable d'env (fields: siteId, key, value)
+- netlify_get_env : voir les variables d'env (fields: siteId)
+` : ""}
+TOUJOURS DISPONIBLE :
+- http_request : appel HTTP générique vers n'importe quelle API (fields: url, method, headers, body, tokenName)
+
+RÈGLES DE GÉNÉRATION DE WIDGETS :
+1. Quand l'utilisateur demande de faire quelque chose sur un service → génère le widget "api_action" avec l'action correcte
+2. Pré-remplis les "actionParams" avec du vrai contenu généré — notamment le code complet pour "content"
+3. Les actionParams sont les valeurs par défaut affichées dans le widget, l'utilisateur peut les modifier avant de valider
+4. Si l'utilisateur demande de "écrire du code", génère le code complet dans actionParams.content
+5. Si plusieurs actions sont nécessaires, explique la séquence et commence par la première
+6. Pour les actions sans token disponible → explique comment ajouter le token via le bouton +
+7. Réponds TOUJOURS en français
+8. Si tu ne sais pas le repo/projet exact → laisse le champ vide pour que l'utilisateur le remplisse
+9. GÉNÈRE DU VRAI CODE, pas des placeholders — si l'utilisateur dit "crée un composant Button", écris le vrai code TypeScript/React complet`;
+  }, [ctx.tokens, ctx.service, ctx.selectedRepo]);
+
+  // ── Envoi de message ────────────────────────────────────────
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || loading) return;
     setInput("");
@@ -265,40 +598,52 @@ Ton rôle : comprendre les demandes de configuration et générer les bons widge
     setLoading(true);
 
     try {
-      if (!ctx.geminiKey) {
+      const geminiKey = ctx.geminiKey;
+
+      if (!geminiKey) {
         addMessage({
           role: "assistant",
-          text: "Clé Gemini non configurée. Cliquez sur l'icône ⚙️ en haut pour l'ajouter.",
+          text: "⚠️ Clé Gemini non configurée. Cliquez sur l'icône ⚙️ en haut pour l'ajouter.",
         });
         return;
       }
 
-      const response = await callGemini(ctx.geminiKey, systemPrompt, text);
-      addMessage({ role: "assistant", text: response.text, widget: response.widget ?? undefined });
+      // Historique pour le contexte
+      const history = messages.slice(-10).map(m => ({
+        role: m.role === "user" ? "user" as const : "model" as const,
+        text: m.text,
+      }));
+
+      const response = await callGemini(geminiKey, systemPrompt, history, text);
+      addMessage({
+        role: "assistant",
+        text: response.text,
+        widget: response.widget ?? undefined,
+      });
     } catch (e) {
-      addMessage({ role: "assistant", text: `Erreur : ${String(e)}` });
+      addMessage({ role: "assistant", text: `❌ Erreur : ${String(e)}` });
     } finally {
       setLoading(false);
     }
-  }, [loading, ctx, systemPrompt]);
+  }, [loading, ctx, systemPrompt, messages, addMessage]);
 
+  // ── Soumission widget ───────────────────────────────────────
   const submitWidget = useCallback(async (msgId: string, values: Record<string, string>, action: string) => {
     setLoading(true);
     try {
       const result = await executeWidgetAction(action, values, ctx);
-      // Marquer le widget comme soumis avec le résultat
       setMessages(prev => prev.map(m =>
         m.id === msgId && m.widget
           ? { ...m, widget: { ...m.widget, submitted: true, result } }
           : m
       ));
-      addMessage({ role: "assistant", text: `✓ ${result}` });
+      addMessage({ role: "assistant", text: result });
     } catch (e) {
-      addMessage({ role: "assistant", text: `Erreur : ${String(e)}` });
+      addMessage({ role: "assistant", text: `❌ Erreur : ${String(e)}` });
     } finally {
       setLoading(false);
     }
-  }, [ctx]);
+  }, [ctx, addMessage]);
 
   return { messages, input, setInput, loading, sendMessage, submitWidget, updateLastAssistantWidget };
 }
