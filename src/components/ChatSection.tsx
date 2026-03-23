@@ -342,7 +342,7 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
     tokens: tokens,
   };
 
-  const { messages, loading, sendMessage, submitWidget } = useChat(enrichedCtx);
+  const { messages, loading, sendMessage, submitWidget, loadMessages } = useChat(enrichedCtx);
 
   /* Titre auto de la conversation */
   const convTitle = messages.length > 0
@@ -364,9 +364,18 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
   /* Scroll bas */
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
 
-  /* Charger une conversation */
+  /* Charger une conversation depuis l'historique */
   const handleSelectConv = (conv: Conversation) => {
     setActiveConvId(conv.id);
+    loadMessages(conv.messages);
+    setShowHistory(false);
+  };
+
+  /* Nouvelle discussion — vider les messages */
+  const handleNewConversation = () => {
+    setActiveConvId(genId());
+    loadMessages([]);
+    setShowHistory(false);
   };
 
   /* Supprimer conversation */
