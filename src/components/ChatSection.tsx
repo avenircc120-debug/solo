@@ -326,9 +326,16 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   /* Enrichir le contexte avec les jetons */
+  // Auto-détection geminiKey depuis les tokens (Gemini, Google)
+  const autoGeminiKey = ctx.geminiKey ?? tokens.find(t =>
+    t.name.toLowerCase().includes("gemini") ||
+    t.name.toLowerCase().includes("google")
+  )?.value;
+
   const enrichedCtx: ChatContext = {
     ...ctx,
     ...(tokens.length > 0 ? { token: tokens[0].value } : {}),
+    ...(autoGeminiKey ? { geminiKey: autoGeminiKey } : {}),
     tokens: tokens,
   };
 
@@ -442,11 +449,17 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
       <div className="flex-1 overflow-y-auto px-4 pt-4">
         {isEmpty && (
           <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
-            className="flex flex-col items-center justify-center h-full gap-4 py-16">
+            className="flex flex-col items-center justify-center h-full gap-4 py-16 px-6">
             <WhaleIcon size={64} />
             <p className="text-lg font-semibold text-gray-800 text-center">
               Comment puis-je vous aider&nbsp;?
             </p>
+            {!autoGeminiKey && (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 max-w-xs text-center space-y-1">
+                <p className="text-xs font-semibold text-amber-700">Ajoutez un jeton Gemini pour commencer</p>
+                <p className="text-[11px] text-amber-600">Appuyez sur <strong>+</strong> en bas → nom : <strong>Gemini</strong>, valeur : votre clé API</p>
+              </div>
+            )}
             {tokens.length > 0 && (
               <div className="flex flex-wrap gap-1.5 justify-center mt-1">
                 {tokens.map(t => (
