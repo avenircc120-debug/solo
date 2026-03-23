@@ -422,21 +422,14 @@ async function executeWidgetAction(
   return `Action "${action}" exécutée.`;
 }
 
-// ── Appel IA via proxy serveur (sans clé exposée côté navigateur) ─
-async function callGemini(
-  _geminiKey: string,
+// ── Appel IA via Groq (proxy serveur) ──────────────────────────
+async function callGroq(
   systemPrompt: string,
   history: { role: "user" | "model"; text: string }[],
   userMessage: string
 ): Promise<{ text: string; widget?: Widget }> {
 
-  const fullPrompt = `${systemPrompt}
-
-HISTORIQUE DE LA CONVERSATION :
-${history.map(h => `${h.role === "user" ? "Utilisateur" : "Assistant"}: ${h.text}`).join("\n")}
-
-Nouveau message de l'utilisateur : "${userMessage}"
-
+  const jsonInstructions = `
 INSTRUCTIONS CRITIQUES :
 1. Réponds UNIQUEMENT avec du JSON valide (zéro markdown, zéro \`\`\`json)
 2. Format requis :
@@ -466,13 +459,19 @@ OU avec widget :
   }
 }`;
 
-  const res = await fetch("/api/gemini", {
+  const messages = [
+    { role: "system", content: systemPrompt + "\n" + jsonInstructions },
+    ...history.map(h => ({
+      role: h.role === "user" ? "user" : "assistant",
+      content: h.text,
+    })),
+    { role: "user", content: userMessage },
+  ];
+
+  const res = await fetch("/api/groq", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: fullPrompt }] }],
-      generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
-    }),
+    body: JSON.stringify({ messages, temperature: 0.3, max_tokens: 4000 }),
   });
 
   if (!res.ok) {
@@ -480,7 +479,7 @@ OU avec widget :
     throw new Error(err.error ?? `Erreur IA ${res.status}`);
   }
   const data = await res.json();
-  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '{"text":"Erreur de réponse."}';
+  const raw = data.choices?.[0]?.message?.content?.trim() ?? '{"text":"Erreur de réponse."}';
 
   const clean = raw.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
 
@@ -592,23 +591,13 @@ RÈGLES DE GÉNÉRATION DE WIDGETS :
     setLoading(true);
 
     try {
-      const geminiKey = ctx.geminiKey;
-
-      if (!geminiKey) {
-        addMessage({
-          role: "assistant",
-          text: "⚠️ Clé Gemini non configurée. Cliquez sur l'icône ⚙️ en haut pour l'ajouter.",
-        });
-        return;
-      }
-
       // Historique pour le contexte
       const history = messages.slice(-10).map(m => ({
         role: m.role === "user" ? "user" as const : "model" as const,
         text: m.text,
       }));
 
-      const response = await callGemini(geminiKey, systemPrompt, history, text);
+      const response = await callGroq(systemPrompt, history, text);
       addMessage({
         role: "assistant",
         text: response.text,
