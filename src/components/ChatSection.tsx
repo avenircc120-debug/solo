@@ -326,11 +326,14 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   /* Enrichir le contexte avec les jetons */
-  // Auto-détection geminiKey depuis les tokens (Gemini, Google)
-  const autoGeminiKey = ctx.geminiKey ?? tokens.find(t =>
-    t.name.toLowerCase().includes("gemini") ||
-    t.name.toLowerCase().includes("google")
-  )?.value;
+  // Clé Gemini : env Vercel → ctx → token "Gemini/Google" dans le panneau +
+  const ENV_GEMINI_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string) || undefined;
+  const autoGeminiKey = ctx.geminiKey
+    ?? ENV_GEMINI_KEY
+    ?? tokens.find(t =>
+        t.name.toLowerCase().includes("gemini") ||
+        t.name.toLowerCase().includes("google")
+      )?.value;
 
   const enrichedCtx: ChatContext = {
     ...ctx,
@@ -454,12 +457,7 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
             <p className="text-lg font-semibold text-gray-800 text-center">
               Comment puis-je vous aider&nbsp;?
             </p>
-            {!autoGeminiKey && (
-              <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 max-w-xs text-center space-y-1">
-                <p className="text-xs font-semibold text-amber-700">Ajoutez un jeton Gemini pour commencer</p>
-                <p className="text-[11px] text-amber-600">Appuyez sur <strong>+</strong> en bas → nom : <strong>Gemini</strong>, valeur : votre clé API</p>
-              </div>
-            )}
+
             {tokens.length > 0 && (
               <div className="flex flex-wrap gap-1.5 justify-center mt-1">
                 {tokens.map(t => (
