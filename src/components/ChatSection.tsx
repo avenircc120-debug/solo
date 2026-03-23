@@ -329,6 +329,7 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
   const enrichedCtx: ChatContext = {
     ...ctx,
     ...(tokens.length > 0 ? { token: tokens[0].value } : {}),
+    tokens: tokens,
   };
 
   const { messages, loading, sendMessage, submitWidget } = useChat(enrichedCtx);
