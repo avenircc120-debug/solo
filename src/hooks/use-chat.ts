@@ -422,18 +422,13 @@ async function executeWidgetAction(
   return `Action "${action}" exécutée.`;
 }
 
-// ── Appel Gemini ────────────────────────────────────────────────
+// ── Appel IA via proxy serveur (sans clé exposée côté navigateur) ─
 async function callGemini(
-  geminiKey: string,
+  _geminiKey: string,
   systemPrompt: string,
   history: { role: "user" | "model"; text: string }[],
   userMessage: string
 ): Promise<{ text: string; widget?: Widget }> {
-
-  const conversationParts = history.map(h => ({
-    role: h.role,
-    parts: [{ text: h.text }],
-  }));
 
   const fullPrompt = `${systemPrompt}
 
@@ -471,23 +466,22 @@ OU avec widget :
   }
 }`;
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: fullPrompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
-      }),
-    }
-  );
+  const res = await fetch("/api/gemini", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: fullPrompt }] }],
+      generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
+    }),
+  });
 
-  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error ?? `Erreur IA ${res.status}`);
+  }
   const data = await res.json();
   const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '{"text":"Erreur de réponse."}';
 
-  // Nettoyer si Gemini enveloppe dans des backticks
   const clean = raw.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim();
 
   try {
