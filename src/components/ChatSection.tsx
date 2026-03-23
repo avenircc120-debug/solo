@@ -364,12 +364,6 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
   /* Scroll bas */
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
 
-  /* Nouvelle discussion */
-  const handleNewConversation = () => {
-    setActiveConvId(genId());
-    setShowHistory(false);
-  };
-
   /* Charger une conversation */
   const handleSelectConv = (conv: Conversation) => {
     setActiveConvId(conv.id);
@@ -442,10 +436,7 @@ export function ChatSection({ ctx }: { ctx: ChatContext }) {
             <span className="text-[9px] text-blue-500 font-medium">{tokens.length} jeton{tokens.length > 1 ? "s" : ""} actif{tokens.length > 1 ? "s" : ""}</span>
           )}
         </div>
-        <button onClick={handleNewConversation}
-          className="p-1.5 rounded-full border border-gray-200 hover:bg-gray-50 transition-colors">
-          <Plus className="w-4 h-4 text-gray-600" />
-        </button>
+        <div className="w-8" />
       </div>
 
       {/* ── Messages ───────────────────────────────────────── */}
