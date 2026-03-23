@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 export interface GeminiRequest {
   prompt: string;
@@ -8,27 +8,11 @@ export interface GeminiRequest {
 }
 
 export function useGemini() {
-  const [geminiKey, setGeminiKey] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string[] | null>(null);
 
-  useEffect(() => {
-    const savedKey = localStorage.getItem('GEMINI_API_KEY');
-    if (savedKey) setGeminiKey(savedKey);
-  }, []);
-
-  const saveKey = (key: string) => {
-    localStorage.setItem('GEMINI_API_KEY', key);
-    setGeminiKey(key);
-  };
-
   const generateVideoScript = async ({ prompt, style, duration, language }: GeminiRequest) => {
-    if (!geminiKey) {
-      setError("Clé API Gemini manquante. Veuillez la configurer dans les paramètres.");
-      return;
-    }
-
     setIsGenerating(true);
     setError(null);
     setResult(null);
@@ -41,24 +25,21 @@ Format : EXACTEMENT 3 segments de texte à l'écran, séparés par "---".
 Chaque segment : 1-2 phrases percutantes. NE METS AUCUN AUTRE TEXTE QUE LES SEGMENTS.`;
 
     try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
-            generationConfig: {
-              temperature: 0.85,
-              maxOutputTokens: 600,
-            }
-          })
-        }
-      );
+      const response = await fetch("/api/gemini", {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
+          generationConfig: {
+            temperature: 0.85,
+            maxOutputTokens: 600,
+          }
+        })
+      });
 
       if (!response.ok) {
         const errData = await response.json();
-        throw new Error(errData.error?.message || `Erreur ${response.status}`);
+        throw new Error(errData.error ?? `Erreur ${response.status}`);
       }
 
       const data = await response.json();
@@ -79,8 +60,8 @@ Chaque segment : 1-2 phrases percutantes. NE METS AUCUN AUTRE TEXTE QUE LES SEGM
   };
 
   return {
-    geminiKey,
-    saveKey,
+    geminiKey: '',
+    saveKey: () => {},
     generateVideoScript,
     isGenerating,
     error,
